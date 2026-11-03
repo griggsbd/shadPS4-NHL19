@@ -348,7 +348,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
-        LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
+        LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}{}", pipeline_hash,
+                 graphics_key.alpha_to_coverage ? " (alpha to coverage)" : "");
 
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
@@ -531,6 +532,14 @@ bool PipelineCache::RefreshGraphicsStages() {
     const auto* fs_info = infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
     key.num_color_attachments = std::bit_width(key.mrt_mask);
+
+    // Alpha to coverage takes its alpha from the MRT0 export. Vulkan leaves the coverage
+    // undefined when location 0 has no alpha, so only enable it when the shader writes one
+    // and the render target swizzle keeps the exported alpha in the alpha channel.
+    key.alpha_to_coverage = regs.alpha_to_mask.enable &&
+                            !regs.depth_shader_control.alpha_to_mask_disable && fs_info &&
+                            fs_info->stores.Get(Shader::IR::Attribute::RenderTarget0, 3) &&
+                            key.color_buffers[0].swizzle.Map(3) == 3;
 
     switch (regs.stage_enable.raw) {
     case AmdGpu::ShaderStageEnable::VgtStages::EsGs:

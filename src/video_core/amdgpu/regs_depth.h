@@ -38,6 +38,18 @@ struct DepthShaderControl {
     ConservativeDepth conservative_z_export : 2;
 };
 
+// DB_ALPHA_TO_MASK: converts the alpha of the first color export (MRT0) into a coverage mask.
+// The offsets select the per-pixel dither thresholds inside a 2x2 quad.
+struct AlphaToMask {
+    u32 enable : 1;
+    u32 : 7;
+    u32 offset0 : 2;
+    u32 offset1 : 2;
+    u32 offset2 : 2;
+    u32 offset3 : 2;
+    u32 offset_round : 1;
+};
+
 enum class CompareFunc : u32 {
     Never = 0,
     Less = 1,
