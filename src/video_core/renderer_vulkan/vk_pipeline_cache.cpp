@@ -536,10 +536,15 @@ bool PipelineCache::RefreshGraphicsStages() {
     // Alpha to coverage takes its alpha from the MRT0 export. Vulkan leaves the coverage
     // undefined when location 0 has no alpha, so only enable it when the shader writes one
     // and the render target swizzle keeps the exported alpha in the alpha channel.
+    // Only persistent shader info is used here, since cached shaders don't restore the rest.
+    const auto mrt0_export_format = key.color_buffers[0].export_format;
+    const bool mrt0_writes_alpha = fs_info && fs_info->mrt0_exports_alpha &&
+                                   mrt0_export_format != AmdGpu::ShaderExportFormat::Zero &&
+                                   mrt0_export_format != AmdGpu::ShaderExportFormat::R_32 &&
+                                   mrt0_export_format != AmdGpu::ShaderExportFormat::GR_32 &&
+                                   key.color_buffers[0].swizzle.Map(3) == 3;
     key.alpha_to_coverage = regs.alpha_to_mask.enable &&
-                            !regs.depth_shader_control.alpha_to_mask_disable && fs_info &&
-                            fs_info->stores.Get(Shader::IR::Attribute::RenderTarget0, 3) &&
-                            key.color_buffers[0].swizzle.Map(3) == 3;
+                            !regs.depth_shader_control.alpha_to_mask_disable && mrt0_writes_alpha;
 
     switch (regs.stage_enable.raw) {
     case AmdGpu::ShaderStageEnable::VgtStages::EsGs:

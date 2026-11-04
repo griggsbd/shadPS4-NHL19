@@ -51,6 +51,9 @@ void Translator::ExportRenderTarget(const GcnInst& inst) {
     const auto& exp = inst.control.exp;
     const IR::Attribute mrt{exp.target};
     info.mrt_mask |= 1u << static_cast<u8>(mrt);
+    if (mrt == IR::Attribute::RenderTarget0 && (exp.en & (exp.compr ? 0b0100 : 0b1000))) {
+        info.mrt0_exports_alpha = true;
+    }
 
     // Dual source blending uses MRT1 for exporting src1
     u32 color_buffer_idx = static_cast<u32>(mrt) - static_cast<u32>(IR::Attribute::RenderTarget0);
