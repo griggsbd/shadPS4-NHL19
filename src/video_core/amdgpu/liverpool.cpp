@@ -168,6 +168,7 @@ void Liverpool::Process(std::stop_token stoken) {
 
                 std::scoped_lock lock{queue.m_access};
                 queue.submits.pop();
+                queue.completed.fetch_add(1, std::memory_order_release);
 
                 --num_submits;
                 std::scoped_lock lock2{submit_mutex};
@@ -1347,6 +1348,62 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     }
 }
 
+void Liverpool::SubmitDone(bool in_order) noexcept {
+    auto& gfx_queue = mapped_queues[GfxQueueId];
+    if (!in_order) {
+        std::scoped_lock lk{submit_mutex};
+        gfx_queue.ccb_buffer_offset = 0;
+        gfx_queue.dcb_buffer_offset = 0;
+        submit_done = true;
+        submit_cv.notify_one();
+        return;
+    }
+
+    // Compute work submitted up to now belongs to the frame that is ending.
+    std::array<u64, NumTotalQueues> asc_targets{};
+    for (u32 qid = 0; qid < NumTotalQueues; ++qid) {
+        if (qid != GfxQueueId) {
+            asc_targets[qid] = mapped_queues[qid].enqueued.load(std::memory_order_acquire);
+        }
+    }
+    auto task = ProcessSubmitDone(asc_targets);
+
+    // Both locks at once, as in SubmitGfx: the GPU thread takes the queue lock first.
+    std::scoped_lock lk{submit_mutex, gfx_queue.m_access};
+    gfx_queue.ccb_buffer_offset = 0;
+    gfx_queue.dcb_buffer_offset = 0;
+    gfx_queue.submits.emplace(task.handle);
+    submit_done_issued.fetch_add(1, std::memory_order_release);
+    ++num_submits;
+    submit_cv.notify_one();
+}
+
+Liverpool::Task Liverpool::ProcessSubmitDone(std::array<u64, NumTotalQueues> asc_targets) {
+    FIBER_ENTER(dcb_task_name);
+    VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Gfx);
+
+    // Like the end of frame work that runs once every queue is idle, wait for the frame's compute
+    // work. Work the game submitted after the frame ended does not hold this up.
+    for (u32 qid = 0; qid < NumTotalQueues; ++qid) {
+        if (qid == GfxQueueId) {
+            continue;
+        }
+        while (mapped_queues[qid].completed.load(std::memory_order_acquire) < asc_targets[qid]) {
+            VideoCore::Prof::Block(VideoCore::Prof::Queue::Gfx, VideoCore::Prof::Cat::RegWait);
+            YIELD_GFX();
+        }
+    }
+    VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Gfx);
+
+    VideoCore::EndCapture();
+    if (rasterizer) {
+        rasterizer->OnSubmit();
+        rasterizer->Flush();
+    }
+    submit_done_processed.fetch_add(1, std::memory_order_release);
+    FIBER_EXIT;
+}
+
 void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     ASSERT_MSG(gnm_vqid > 0 && gnm_vqid < NumTotalQueues, "Invalid virtual ASC queue index");
     auto& queue = mapped_queues[gnm_vqid];
@@ -1356,6 +1413,7 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);
+        queue.enqueued.fetch_add(1, std::memory_order_release);
     }
 
     std::scoped_lock lk{submit_mutex};

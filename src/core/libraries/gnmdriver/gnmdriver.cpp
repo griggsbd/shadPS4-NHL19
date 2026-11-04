@@ -85,6 +85,13 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
     cv_lock.notify_all();
 }
 
+// With frame overlap the game may submit its next frame while the GPU thread is still processing
+// the current one, instead of waiting for the GPU to go idle after every frame. Copied command
+// buffers are reused at the end of each frame, so they need the idle wait.
+static bool UseFrameOverlap() {
+    return EmulatorSettings.IsFrameOverlap() && !EmulatorSettings.IsCopyGpuBuffers();
+}
+
 static void WaitGpuIdle() {
     HLE_TRACE;
     VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::GpuIdle};
@@ -1473,15 +1480,20 @@ s32 PS4_SYSV_ABI sceGnmRequestFlipAndSubmitDoneForWorkload(u64 workload, u32* gp
     }
     liverpool->SubmitGfx(dcb_span, {});
 
-    if (!liverpool->IsGpuIdle()) {
+    const bool overlap = UseFrameOverlap();
+    if (!overlap && !liverpool->IsGpuIdle()) {
         submission_lock = true;
     }
-    liverpool->SubmitDone();
+    liverpool->SubmitDone(overlap);
     send_init_packet = true;
 
     // Pace the game against the display only after its frame has reached the GPU.
     lk.unlock();
     VideoOut::WaitForFlipBacklog();
+    if (overlap) {
+        // Keep the GPU thread at most one frame behind the game.
+        liverpool->WaitSubmitDoneBacklog(1);
+    }
     return ORBIS_OK;
 }
 
@@ -2485,15 +2497,21 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
-    std::scoped_lock lk{m_submit_lock};
+    const bool overlap = UseFrameOverlap();
+    std::unique_lock lk{m_submit_lock};
     WaitGpuIdle();
-    if (!liverpool->IsGpuIdle()) {
+    if (!overlap && !liverpool->IsGpuIdle()) {
         submission_lock = true;
     }
-    liverpool->SubmitDone();
+    liverpool->SubmitDone(overlap);
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
+    lk.unlock();
+    if (overlap) {
+        // Keep the GPU thread at most one frame behind the game.
+        liverpool->WaitSubmitDoneBacklog(1);
+    }
     return ORBIS_OK;
 }
 
