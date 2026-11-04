@@ -117,4 +117,7 @@ private:
     std::queue<Request> requests;
 };
 
+// Frame pacing diagnostics: records when the game submits a flip.
+void TracePacingGameSubmit();
+
 } // namespace Libraries::VideoOut

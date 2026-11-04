@@ -13,10 +13,106 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
+#include <chrono>
+#include <iterator>
+#include <string>
+#include <vector>
+
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
 namespace Libraries::VideoOut {
+
+namespace {
+// Frame pacing diagnostics. Timestamps each game frame at the three points it passes through
+// (game submits the flip, emulated GPU reaches it, present thread shows it) and logs the
+// intervals once every 60 presented frames. Observation only, no behavior changes.
+using PacingClock = std::chrono::steady_clock;
+
+struct PacingTrace {
+    std::mutex mutex;
+    std::vector<float> game_submit;  // ms between game flip submissions
+    std::vector<float> gpu_flip;     // ms between the emulated GPU reaching flips
+    std::vector<float> prepare_wait; // ms the GPU thread spent preparing the frame
+    std::vector<float> vblank;       // ms between present thread iterations
+    std::vector<float> present;      // ms between presents of new frames
+    std::vector<float> present_cost; // ms spent inside Presenter::Present
+    std::vector<u32> queue_left;     // flips still queued after one was taken
+    PacingClock::time_point last_game{};
+    PacingClock::time_point last_gpu{};
+    PacingClock::time_point last_vblank{};
+    PacingClock::time_point last_present{};
+    u32 empty_vblanks{};
+};
+
+PacingTrace pacing;
+
+float IntervalMs(PacingClock::time_point& last, PacingClock::time_point now) {
+    const bool first = last == PacingClock::time_point{};
+    const float ms = first ? 0.0f : std::chrono::duration<float, std::milli>(now - last).count();
+    last = now;
+    return ms;
+}
+
+template <typename T>
+void PushCapped(std::vector<T>& values, T value) {
+    // Long stretches without presents (loading screens) would otherwise grow these unbounded.
+    if (values.size() < 600) {
+        values.push_back(value);
+    }
+}
+
+float ElapsedMs(PacingClock::time_point since) {
+    return std::chrono::duration<float, std::milli>(PacingClock::now() - since).count();
+}
+
+std::string JoinMs(const std::vector<float>& values) {
+    std::string out;
+    for (const float value : values) {
+        fmt::format_to(std::back_inserter(out), "{:.1f} ", value);
+    }
+    return out;
+}
+
+std::string JoinCounts(const std::vector<u32>& values) {
+    std::string out;
+    for (const u32 value : values) {
+        fmt::format_to(std::back_inserter(out), "{} ", value);
+    }
+    return out;
+}
+
+void TracePacingPresent(PacingClock::time_point present_start, float present_cost) {
+    std::scoped_lock lk{pacing.mutex};
+    pacing.present.push_back(IntervalMs(pacing.last_present, present_start));
+    pacing.present_cost.push_back(present_cost);
+    if (pacing.present.size() < 60) {
+        return;
+    }
+    LOG_INFO(Lib_VideoOut, "Pacing game_submit: {}", JoinMs(pacing.game_submit));
+    LOG_INFO(Lib_VideoOut, "Pacing gpu_flip: {}", JoinMs(pacing.gpu_flip));
+    LOG_INFO(Lib_VideoOut, "Pacing prepare_wait: {}", JoinMs(pacing.prepare_wait));
+    LOG_INFO(Lib_VideoOut, "Pacing vblank: {}", JoinMs(pacing.vblank));
+    LOG_INFO(Lib_VideoOut, "Pacing present: {}", JoinMs(pacing.present));
+    LOG_INFO(Lib_VideoOut, "Pacing present_cost: {}", JoinMs(pacing.present_cost));
+    LOG_INFO(Lib_VideoOut, "Pacing queue_left: {}empty_vblanks: {}", JoinCounts(pacing.queue_left),
+             pacing.empty_vblanks);
+    pacing.game_submit.clear();
+    pacing.gpu_flip.clear();
+    pacing.prepare_wait.clear();
+    pacing.vblank.clear();
+    pacing.present.clear();
+    pacing.present_cost.clear();
+    pacing.queue_left.clear();
+    pacing.empty_vblanks = 0;
+}
+} // namespace
+
+void TracePacingGameSubmit() {
+    const auto now = PacingClock::now();
+    std::scoped_lock lk{pacing.mutex};
+    PushCapped(pacing.game_submit, IntervalMs(pacing.last_game, now));
+}
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
     switch (format) {
@@ -238,7 +334,9 @@ void VideoOutDriver::Flip(const Request& req) {
     presenter->SetHDR(req.port->is_hdr);
 
     // Present the frame.
+    const auto present_start = PacingClock::now();
     presenter->Present(req.frame);
+    const float present_cost = ElapsedMs(present_start);
 
     auto* port = req.port;
 
@@ -277,6 +375,8 @@ void VideoOutDriver::Flip(const Request& req) {
                                         (req.flip_arg << 16)));
         }
     }
+
+    TracePacingPresent(present_start, present_cost);
 }
 
 void VideoOutDriver::DrawBlankFrame() {
@@ -318,6 +418,7 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+    const auto gpu_reach = PacingClock::now();
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
@@ -326,6 +427,12 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
         const auto& group = port->groups[buffer.group_index];
         frame = presenter->PrepareFrame(group, buffer.address_left);
+    }
+    {
+        const float prepare_wait = ElapsedMs(gpu_reach);
+        std::scoped_lock plk{pacing.mutex};
+        PushCapped(pacing.gpu_flip, IntervalMs(pacing.last_gpu, gpu_reach));
+        PushCapped(pacing.prepare_wait, prepare_wait);
     }
 
     std::scoped_lock lock{mutex};
@@ -352,13 +459,23 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         if (!requests.empty()) {
             const auto request = requests.front();
             requests.pop();
+            const auto left = static_cast<u32>(requests.size());
+            std::scoped_lock plk{pacing.mutex};
+            PushCapped(pacing.queue_left, left);
             return request;
         }
+        std::scoped_lock plk{pacing.mutex};
+        ++pacing.empty_vblanks;
         return {};
     };
 
     while (!token.stop_requested()) {
         timer.Start();
+        {
+            const auto now = PacingClock::now();
+            std::scoped_lock plk{pacing.mutex};
+            PushCapped(pacing.vblank, IntervalMs(pacing.last_vblank, now));
+        }
 
         if (DebugState.IsGuestThreadsPaused()) {
             DrawLastFrame();
