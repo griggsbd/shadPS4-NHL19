@@ -277,6 +277,31 @@ void VideoOutDriver::Flip(const Request& req) {
                                         (req.flip_arg << 16)));
         }
     }
+
+    if (req.seq != 0) {
+        std::scoped_lock lk{flip_pacing_mutex};
+        last_presented_seq = std::max(last_presented_seq, req.seq);
+    }
+    flip_pacing_cv.notify_all();
+}
+
+u64 VideoOutDriver::NextFlipSeq() {
+    std::scoped_lock lk{flip_pacing_mutex};
+    return ++last_submitted_seq;
+}
+
+void VideoOutDriver::WaitForFlipBacklog() {
+    std::unique_lock lk{flip_pacing_mutex};
+    // Wait for the flip submitted before the newest one. The timeout only guards against a flip
+    // that never gets presented; it leaves the sequence numbers alone, so pacing resumes as soon
+    // as later flips reach the screen.
+    const u64 target = last_submitted_seq > 0 ? last_submitted_seq - 1 : 0;
+    const bool caught_up = flip_pacing_cv.wait_for(lk, std::chrono::milliseconds(100),
+                                                   [&] { return last_presented_seq >= target; });
+    if (!caught_up && (++flip_pacing_timeouts <= 10 || flip_pacing_timeouts % 100 == 0)) {
+        LOG_WARNING(Lib_VideoOut, "Flip pacing wait timed out at flip {} ({} timeouts)",
+                    last_submitted_seq, flip_pacing_timeouts);
+    }
 }
 
 void VideoOutDriver::DrawBlankFrame() {
@@ -292,7 +317,7 @@ void VideoOutDriver::DrawLastFrame() {
 }
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
-                                bool is_eop /*= false*/) {
+                                bool is_eop /*= false*/, u64 seq /*= 0*/) {
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -309,15 +334,17 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
+        liverpool->SendCommand(
+            [=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop, seq); });
     } else {
-        SubmitFlipInternal(port, index, flip_arg, is_eop);
+        SubmitFlipInternal(port, index, flip_arg, is_eop, seq);
     }
 
     return true;
 }
 
-void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
+                                        u64 seq) {
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
@@ -335,6 +362,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         .flip_arg = flip_arg,
         .index = index,
         .eop = is_eop,
+        .seq = seq,
     });
 }
 
