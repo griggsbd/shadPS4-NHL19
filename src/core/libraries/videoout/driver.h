@@ -90,11 +90,12 @@ public:
     int ChangeBufferAttribute(VideoOutPort* port, s32 bufferIndex,
                               const BufferAttribute* attribute);
 
-    bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false, u64 seq = 0);
 
-    // Flip pacing: after the game submits a flip, its thread is held until at most one of its
-    // flips is still waiting to be presented, so it can't race several frames ahead and stall.
-    void NoteFlipSubmitted();
+    // Flip pacing: every game flip gets a sequence number when it is submitted. After a submit,
+    // the game's thread is held until the flip before it has been presented, so it can't race
+    // several frames ahead and stall. Sequence numbers can't drift if a flip is late or lost.
+    u64 NextFlipSeq();
     void WaitForFlipBacklog();
 
 private:
@@ -104,6 +105,7 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        u64 seq;
 
         operator bool() const noexcept {
             return frame != nullptr;
@@ -113,7 +115,8 @@ private:
     void Flip(const Request& req);
     void DrawBlankFrame(); // Video port out not open
     void DrawLastFrame();  // Used when there is no flip request
-    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false,
+                            u64 seq = 0);
     void PresentThread(std::stop_token token);
 
     std::mutex mutex;
@@ -123,8 +126,8 @@ private:
 
     std::mutex flip_pacing_mutex;
     std::condition_variable flip_pacing_cv;
-    u64 flips_submitted{};
-    u64 flips_presented{};
+    u64 last_submitted_seq{};
+    u64 last_presented_seq{};
     u32 flip_pacing_timeouts{};
 };
 
