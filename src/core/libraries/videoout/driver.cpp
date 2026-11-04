@@ -31,13 +31,14 @@ using PacingClock = std::chrono::steady_clock;
 
 struct PacingTrace {
     std::mutex mutex;
-    std::vector<float> game_submit;  // ms between game flip submissions
-    std::vector<float> gpu_flip;     // ms between the emulated GPU reaching flips
-    std::vector<float> prepare_wait; // ms the GPU thread spent preparing the frame
-    std::vector<float> vblank;       // ms between present thread iterations
-    std::vector<float> present;      // ms between presents of new frames
-    std::vector<float> present_cost; // ms spent inside Presenter::Present
-    std::vector<u32> queue_left;     // flips still queued after one was taken
+    std::vector<float> game_submit;   // ms between game flip submissions
+    std::vector<float> gpu_flip;      // ms between the emulated GPU reaching flips
+    std::vector<float> prepare_wait;  // ms the GPU thread spent preparing the frame
+    std::vector<float> vblank;        // ms between present thread iterations
+    std::vector<float> present;       // ms between presents of new frames
+    std::vector<float> present_cost;  // ms spent inside Presenter::Present
+    std::vector<u32> queue_left;      // flips still queued after one was taken
+    std::vector<float> throttle_wait; // ms the game was held by flip pacing after a submit
     PacingClock::time_point last_game{};
     PacingClock::time_point last_gpu{};
     PacingClock::time_point last_vblank{};
@@ -97,6 +98,7 @@ void TracePacingPresent(PacingClock::time_point present_start, float present_cos
     LOG_INFO(Lib_VideoOut, "Pacing present_cost: {}", JoinMs(pacing.present_cost));
     LOG_INFO(Lib_VideoOut, "Pacing queue_left: {}empty_vblanks: {}", JoinCounts(pacing.queue_left),
              pacing.empty_vblanks);
+    LOG_INFO(Lib_VideoOut, "Pacing throttle_wait: {}", JoinMs(pacing.throttle_wait));
     pacing.game_submit.clear();
     pacing.gpu_flip.clear();
     pacing.prepare_wait.clear();
@@ -104,6 +106,7 @@ void TracePacingPresent(PacingClock::time_point present_start, float present_cos
     pacing.present.clear();
     pacing.present_cost.clear();
     pacing.queue_left.clear();
+    pacing.throttle_wait.clear();
     pacing.empty_vblanks = 0;
 }
 } // namespace
@@ -376,7 +379,39 @@ void VideoOutDriver::Flip(const Request& req) {
         }
     }
 
+    {
+        std::scoped_lock lk{flip_pacing_mutex};
+        ++flips_presented;
+    }
+    flip_pacing_cv.notify_all();
+
     TracePacingPresent(present_start, present_cost);
+}
+
+void VideoOutDriver::NoteFlipSubmitted() {
+    std::scoped_lock lk{flip_pacing_mutex};
+    ++flips_submitted;
+}
+
+void VideoOutDriver::WaitForFlipBacklog() {
+    const auto wait_start = PacingClock::now();
+    std::unique_lock lk{flip_pacing_mutex};
+    const auto backlog = [this] { return static_cast<s64>(flips_submitted - flips_presented); };
+    const bool caught_up =
+        flip_pacing_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return backlog() <= 1; });
+    if (!caught_up) {
+        // A flip that never reaches the screen must not hold up every frame after it.
+        if (++flip_pacing_timeouts <= 10 || flip_pacing_timeouts % 100 == 0) {
+            LOG_WARNING(Lib_VideoOut, "Flip pacing wait timed out with {} flips pending ({} total)",
+                        backlog(), flip_pacing_timeouts);
+        }
+        flips_presented = flips_submitted - 1;
+    }
+    lk.unlock();
+
+    const float waited = ElapsedMs(wait_start);
+    std::scoped_lock plk{pacing.mutex};
+    PushCapped(pacing.throttle_wait, waited);
 }
 
 void VideoOutDriver::DrawBlankFrame() {

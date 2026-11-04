@@ -181,6 +181,7 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
         LOG_ERROR(Lib_VideoOut, "Flip queue is full");
         return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
     }
+    driver->NoteFlipSubmitted();
 
     return ORBIS_OK;
 }
@@ -349,6 +350,7 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
     TracePacingGameSubmit();
+    driver->NoteFlipSubmitted();
 
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
@@ -364,6 +366,10 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
         });
 
     return ORBIS_OK;
+}
+
+void WaitForFlipBacklog() {
+    driver->WaitForFlipBacklog();
 }
 
 s32 PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo(

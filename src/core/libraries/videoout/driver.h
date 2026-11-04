@@ -92,6 +92,11 @@ public:
 
     bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
 
+    // Flip pacing: after the game submits a flip, its thread is held until at most one of its
+    // flips is still waiting to be presented, so it can't race several frames ahead and stall.
+    void NoteFlipSubmitted();
+    void WaitForFlipBacklog();
+
 private:
     struct Request {
         Vulkan::Frame* frame;
@@ -115,6 +120,12 @@ private:
     VideoOutPort main_port{};
     std::jthread present_thread;
     std::queue<Request> requests;
+
+    std::mutex flip_pacing_mutex;
+    std::condition_variable flip_pacing_cv;
+    u64 flips_submitted{};
+    u64 flips_presented{};
+    u32 flip_pacing_timeouts{};
 };
 
 // Frame pacing diagnostics: records when the game submits a flip.

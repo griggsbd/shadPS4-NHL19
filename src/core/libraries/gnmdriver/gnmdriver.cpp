@@ -1434,7 +1434,7 @@ s32 PS4_SYSV_ABI sceGnmRequestFlipAndSubmitDoneForWorkload(u64 workload, u32* gp
         return ORBIS_GNM_ERROR_SUBMISSION_NOT_ENOUGH_RESOURCES;
     }
 
-    std::scoped_lock lk{m_submit_lock};
+    std::unique_lock lk{m_submit_lock};
     WaitGpuIdle();
 
     // Write a PrepareFlip, then patch the flip request
@@ -1477,6 +1477,9 @@ s32 PS4_SYSV_ABI sceGnmRequestFlipAndSubmitDoneForWorkload(u64 workload, u32* gp
     liverpool->SubmitDone();
     send_init_packet = true;
 
+    // Pace the game against the display only after its frame has reached the GPU.
+    lk.unlock();
+    VideoOut::WaitForFlipBacklog();
     return ORBIS_OK;
 }
 
@@ -2412,7 +2415,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     auto* cmdbuf = dcb_gpu_addrs[count - 1];
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
-    std::scoped_lock lk{m_submit_lock};
+    std::unique_lock lk{m_submit_lock};
     WaitGpuIdle();
 
     const s32 patch_result =
@@ -2421,8 +2424,16 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
         return patch_result;
     }
 
-    return PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
-                         const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
+    const s32 result =
+        PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
+                      const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
+
+    // Pace the game against the display only after its frame has reached the GPU.
+    lk.unlock();
+    if (result == ORBIS_OK) {
+        VideoOut::WaitForFlipBacklog();
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
