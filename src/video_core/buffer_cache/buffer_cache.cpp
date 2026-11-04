@@ -13,6 +13,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/region_definitions.h"
+#include "video_core/gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -134,6 +135,7 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                              bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write, async] {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Readback};
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
         const auto* arena = GetArena(first_block, last_block);
@@ -154,6 +156,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     if (assume_locks) {
         flush_request();
     } else {
+        VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::ReadbackStall};
         liverpool->SendCommand<true>(std::move(flush_request));
     }
 }
@@ -449,6 +452,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
 
 bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size,
                                     bool is_written, bool is_texel_buffer) {
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::BufferUpload};
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
     memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {

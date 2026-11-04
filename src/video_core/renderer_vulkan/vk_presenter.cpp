@@ -18,6 +18,7 @@
 #include "imgui/shadnet_notifications_layer.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/gpu_profiler.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -1088,6 +1089,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 }
 
 Frame* Presenter::GetRenderFrame() {
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::FrameWait};
     // Wait for free presentation frames
     Frame* frame;
     {

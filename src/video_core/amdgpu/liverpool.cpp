@@ -16,6 +16,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/gpu_profiler.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -117,6 +118,7 @@ void Liverpool::ProcessCommands() {
             command_queue.pop();
             --num_commands;
         }
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Commands};
         callback();
     }
 }
@@ -130,6 +132,7 @@ void Liverpool::Process(std::stop_token stoken) {
 
     while (!stoken.stop_requested()) {
         {
+            VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Idle};
             std::unique_lock lk{submit_mutex};
             Common::CondvarWait(submit_cv, lk, stoken,
                                 [this] { return num_commands || num_submits || submit_done; });
@@ -187,6 +190,7 @@ void Liverpool::Process(std::stop_token stoken) {
 
 Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_ENTER(ccb_task_name);
+    VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Ce);
 
     while (!ccb.empty()) {
         ProcessCommands();
@@ -232,8 +236,10 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             const auto diff = it_body[0];
             while (cblock.ce_count >= cblock.de_count &&
                    (cblock.ce_count - cblock.de_count) >= diff) {
+                VideoCore::Prof::Block(VideoCore::Prof::Queue::Ce, VideoCore::Prof::Cat::CeWait);
                 YIELD_CE();
             }
+            VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Ce);
             break;
         }
         case PM4ItOpcode::IndirectBufferConst: {
@@ -257,8 +263,10 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             }
             const auto* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
+                VideoCore::Prof::Block(VideoCore::Prof::Queue::Ce, VideoCore::Prof::Cat::RegWait);
                 YIELD_CE();
             }
+            VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Ce);
             break;
         }
         default:
@@ -274,6 +282,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
 
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
     FIBER_ENTER(dcb_task_name);
+    VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Gfx);
 
     auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
@@ -819,8 +828,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     mem_semaphore->Signal();
                 } else {
                     while (!mem_semaphore->Signaled()) {
+                        VideoCore::Prof::Block(VideoCore::Prof::Queue::Gfx,
+                                               VideoCore::Prof::Cat::RegWait);
                         YIELD_GFX();
                     }
+                    VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Gfx);
                     mem_semaphore->Decrement();
                 }
                 break;
@@ -835,8 +847,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
                 while (!rewind->Valid()) {
+                    VideoCore::Prof::Block(VideoCore::Prof::Queue::Gfx,
+                                           VideoCore::Prof::Cat::RegWait);
                     YIELD_GFX();
                 }
+                VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Gfx);
                 break;
             }
             case PM4ItOpcode::WaitRegMem: {
@@ -847,13 +862,24 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 // there are no other submits to yield to we can sleep the thread
                 // instead and allow other tasks to run.
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
+                const bool is_vo_label = vo_port->IsVoLabel(wait_addr);
+                if (is_vo_label && num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    {
+                        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::VoWait};
+                        vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
+                    }
+                    VideoCore::Prof::MarkVoCheck();
                     break;
                 }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    VideoCore::Prof::Block(VideoCore::Prof::Queue::Gfx,
+                                           is_vo_label ? VideoCore::Prof::Cat::VoWait
+                                                       : VideoCore::Prof::Cat::RegWait);
                     YIELD_GFX();
+                }
+                VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Gfx);
+                if (is_vo_label) {
+                    VideoCore::Prof::MarkVoCheck();
                 }
                 break;
             }
@@ -885,8 +911,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::WaitOnCeCounter: {
                 while (cblock.ce_count <= cblock.de_count) {
+                    VideoCore::Prof::Block(VideoCore::Prof::Queue::Gfx,
+                                           VideoCore::Prof::Cat::CeWait);
                     YIELD_GFX();
                 }
+                VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Gfx);
                 break;
             }
             case PM4ItOpcode::PfpSyncMe: {
@@ -969,6 +998,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Asc);
     auto& queue = asc_queues[{vqid}];
 
     struct IndirectPatch {
@@ -1108,8 +1138,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             }
             const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
+                VideoCore::Prof::Block(VideoCore::Prof::Queue::Asc, VideoCore::Prof::Cat::RegWait);
                 YIELD_ASC(vqid);
             }
+            VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Asc);
             break;
         }
         case PM4ItOpcode::SetShReg: {
@@ -1199,8 +1231,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 mem_semaphore->Signal();
             } else {
                 while (!mem_semaphore->Signaled()) {
+                    VideoCore::Prof::Block(VideoCore::Prof::Queue::Asc,
+                                           VideoCore::Prof::Cat::RegWait);
                     YIELD_ASC(vqid);
                 }
+                VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Asc);
                 mem_semaphore->Decrement();
             }
             break;
@@ -1209,8 +1244,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                VideoCore::Prof::Block(VideoCore::Prof::Queue::Asc, VideoCore::Prof::Cat::RegWait);
                 YIELD_ASC(vqid);
             }
+            VideoCore::Prof::Unblock(VideoCore::Prof::Queue::Asc);
             break;
         }
         case PM4ItOpcode::ReleaseMem: {

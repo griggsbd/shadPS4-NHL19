@@ -11,6 +11,7 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -238,7 +239,10 @@ void VideoOutDriver::Flip(const Request& req) {
     presenter->SetHDR(req.port->is_hdr);
 
     // Present the frame.
-    presenter->Present(req.frame);
+    {
+        VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::Present};
+        presenter->Present(req.frame);
+    }
 
     auto* port = req.port;
 
@@ -291,6 +295,7 @@ u64 VideoOutDriver::NextFlipSeq() {
 }
 
 void VideoOutDriver::WaitForFlipBacklog() {
+    VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::Pacing};
     std::unique_lock lk{flip_pacing_mutex};
     // Wait for the flip submitted before the newest one. The timeout only guards against a flip
     // that never gets presented; it leaves the sequence numbers alone, so pacing resumes as soon
@@ -345,6 +350,8 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
                                         u64 seq) {
+    VideoCore::Prof::OnFlip(EmulatorSettings.GetVblankFrequency());
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Flip};
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);

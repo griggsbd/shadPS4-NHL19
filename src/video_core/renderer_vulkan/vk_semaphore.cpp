@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <limits>
+#include "video_core/gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 
@@ -56,6 +57,7 @@ void Semaphore::Wait(u64 tick) {
     }
 
     // If none of the above is hit, fallback to a regular wait
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::HostWait};
     const vk::SemaphoreWaitInfo wait_info = {
         .semaphoreCount = 1,
         .pSemaphores = &semaphore.get(),

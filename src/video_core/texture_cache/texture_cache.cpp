@@ -12,6 +12,7 @@
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/gpu_profiler.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -111,6 +112,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         return;
     }
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Readback};
     const auto image_addr = image.info.guest_address;
     const auto image_size = image.info.guest_size;
     const auto image_mips = image.info.resources.levels;
@@ -856,6 +858,7 @@ void TextureCache::RefreshImage(Image& image) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::ImageUpload};
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));

@@ -10,6 +10,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/gpu_profiler.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -186,6 +187,7 @@ void Rasterizer::EliminateFastClear() {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Draw};
 
     FlushPeriodically();
     scheduler.PopPendingOperations();
@@ -195,27 +197,42 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const GraphicsPipeline* pipeline = [&] {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Pipeline};
+        return pipeline_cache.GetGraphicsPipeline();
+    }();
     if (!pipeline) {
         return;
     }
 
-    PrepareRenderState(pipeline);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Targets};
+        PrepareRenderState(pipeline);
+    }
     if (!BindResources(pipeline)) {
         return;
     }
-    const auto state = BeginRendering(pipeline);
+    const auto state = [&] {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Targets};
+        return BeginRendering(pipeline);
+    }();
 
-    BindVertexBuffers(pipeline);
-    if (is_indexed) {
-        BindIndexBuffer(index_offset);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::VertexIndex};
+        BindVertexBuffers(pipeline);
+        if (is_indexed) {
+            BindIndexBuffer(index_offset);
+        }
     }
 
     if (needs_barrier) {
         runtime.FlushBarriers();
     }
 
-    pipeline->BindResources(set_writes, push_data);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Descriptors};
+        pipeline->BindResources(set_writes, push_data);
+    }
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
@@ -242,6 +259,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                               u16 instance_sgpr_offset) {
     RENDERER_TRACE;
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Draw};
 
     FlushPeriodically();
     scheduler.PopPendingOperations();
@@ -255,20 +273,32 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         .instance_sgpr_offset = instance_sgpr_offset,
         .is_indirect = true,
     };
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
+    const GraphicsPipeline* pipeline = [&] {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Pipeline};
+        return pipeline_cache.GetGraphicsPipeline(params);
+    }();
     if (!pipeline) {
         return;
     }
 
-    PrepareRenderState(pipeline);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Targets};
+        PrepareRenderState(pipeline);
+    }
     if (!BindResources(pipeline)) {
         return;
     }
-    const auto state = BeginRendering(pipeline);
+    const auto state = [&] {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Targets};
+        return BeginRendering(pipeline);
+    }();
 
-    BindVertexBuffers(pipeline);
-    if (is_indexed) {
-        BindIndexBuffer(0, true);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::VertexIndex};
+        BindVertexBuffers(pipeline);
+        if (is_indexed) {
+            BindIndexBuffer(0, true);
+        }
     }
 
     const auto size = stride * max_count;
@@ -289,7 +319,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         runtime.FlushBarriers();
     }
 
-    pipeline->BindResources(set_writes, push_data);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Descriptors};
+        pipeline->BindResources(set_writes, push_data);
+    }
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
@@ -323,12 +356,16 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Dispatch};
 
     FlushPeriodically();
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline = [&] {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Pipeline};
+        return pipeline_cache.GetComputePipeline();
+    }();
     if (!pipeline) {
         return;
     }
@@ -347,7 +384,10 @@ void Rasterizer::DispatchDirect() {
     }
 
     scheduler.EndRendering();
-    pipeline->BindResources(set_writes, push_data);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Descriptors};
+        pipeline->BindResources(set_writes, push_data);
+    }
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
@@ -359,12 +399,16 @@ void Rasterizer::DispatchDirect() {
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Dispatch};
 
     FlushPeriodically();
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline = [&] {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Pipeline};
+        return pipeline_cache.GetComputePipeline();
+    }();
     if (!pipeline) {
         return;
     }
@@ -382,7 +426,10 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     }
 
     scheduler.EndRendering();
-    pipeline->BindResources(set_writes, push_data);
+    {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Descriptors};
+        pipeline->BindResources(set_writes, push_data);
+    }
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
@@ -417,6 +464,7 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Fence};
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
@@ -424,6 +472,7 @@ void Rasterizer::OnSubmit() {
 }
 
 void Rasterizer::OnFence() {
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Fence};
     texture_cache.ProcessDownloadImages();
 }
 
@@ -449,12 +498,19 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         }
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
-        BindBuffers(*stage, binding, push_data);
-        BindTextures(*stage, binding);
+        {
+            VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Buffers};
+            BindBuffers(*stage, binding, push_data);
+        }
+        {
+            VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Textures};
+            BindTextures(*stage, binding);
+        }
         uses_dma |= stage->uses_dma;
     }
 
     if (uses_dma) {
+        VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Buffers};
         buffer_cache.SynchronizeDmaBuffers();
     }
 
@@ -1234,6 +1290,7 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Dma};
     ASSERT_MSG(address % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer address and size must be a multiple of 4 bytes");
     if (!is_gds) {
@@ -1255,6 +1312,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+    VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Dma};
     if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
