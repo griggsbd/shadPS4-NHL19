@@ -28,7 +28,7 @@ With this build and config, NHL 19:
 - [What you need](#what-you-need)
 - [Setup](#setup)
 - [The config, setting by setting](#the-config-setting-by-setting)
-- [Lighter settings for other PCs and screens](#lighter-settings-for-other-pcs-and-screens)
+- [Adjusting for your PC and screen](#adjusting-for-your-pc-and-screen)
 - [Using Puck Peak Overtime](#using-puck-peak-overtime)
 - [Troubleshooting](#troubleshooting)
 - [What was changed and why](#what-was-changed-and-why)
@@ -52,10 +52,10 @@ scenes are limited by how fast the emulator processes each draw, which none of t
 ## What you need
 
 - **Windows 10 or 11, 64-bit.** The code also builds for Linux and macOS, but only Windows was tested.
-- **A fast CPU and GPU.** At 90 fps the emulator leans hard on one CPU core, and 4K Pro mode needs a strong
-  graphics card. On a slower PC, see [Lighter settings](#lighter-settings-for-other-pcs-and-screens).
-- **A screen that shows 90 fps evenly:** 90 Hz, 180 Hz, or any screen with variable refresh (FreeSync or G-Sync).
-  On other screens, use 60 fps.
+- **A fast CPU and GPU.** The emulator leans hard on one CPU core, and 4K Pro mode needs a strong graphics card.
+- **A screen that suits the frame rate.** The config aims for 90 fps, which looks even on 90 Hz and 180 Hz screens
+  and on any screen with variable refresh (FreeSync or G-Sync). For other screens or a slower PC, pick a different
+  rate as described in [Frame rate](#frame-rate).
 - **Your NHL 19 dump**, CUSA11126, update 1.60. The update can be merged into the game folder or sit next to
   it as `CUSA11126-UPDATE`. The game folder is the one that contains `eboot.bin` and `sce_sys`.
 
@@ -107,7 +107,8 @@ The two lines may not sit next to each other in the file. Make sure the width ge
 shadPS4 is closed.
 
 `CUSA11126.json` holds the settings that make the game run well. Each one is explained
-[below](#the-config-setting-by-setting).
+[below](#the-config-setting-by-setting). If your screen or PC differs from the test PC, also change
+`vblank_frequency` in it as described in [Frame rate](#frame-rate).
 
 ### 5. Play
 
@@ -149,8 +150,8 @@ Settings marked **this build** only exist in this fork. Other shadPS4 builds ign
 | `neo_mode` | `true` | PS4 Pro mode. The game uses its Pro renderer, which renders at the resolution set in `config.json` (4K above). |
 | `readbacks_mode` | `2` | Precise GPU readbacks. NHL 19 reads data back from the GPU about a dozen times every frame. Without this, gameplay renders black. |
 | `readback_linear_images_enabled` | `true` | Also reads back images the GPU wrote in a linear layout. On in all testing; the game wasn't tested without it. |
-| `vblank_frequency` | `90` | The refresh rate of the emulated PS4 display, which sets the game's frame rate. NHL 19 keeps normal game speed at 90. |
-| `flip_queue_depth` | `2` | **This build.** Lets two finished frames wait for the screen instead of one, so a late frame doesn't cost a whole refresh. Adds about one frame (11 ms) of input delay. [Details](#4-dips-from-90-and-45-fps-stoppages-flip-queue-frame-overlap-and-flip-rate). |
+| `vblank_frequency` | `90` | The refresh rate of the emulated PS4 display, which sets the game's frame rate. 90 suits the test PC. See [Frame rate](#frame-rate) for other values. |
+| `flip_queue_depth` | `2` | **This build.** Lets two finished frames wait for the screen instead of one, so a late frame doesn't cost a whole refresh. Adds about one frame (11 ms at 90 fps) of input delay. [Details](#4-dips-from-90-and-45-fps-stoppages-flip-queue-frame-overlap-and-flip-rate). |
 | `frame_overlap` | `true` | **This build.** Lets the game start its next frame while the emulator is still processing the current one. Works together with `flip_queue_depth`. |
 | `ignore_flip_rate` | `true` | **This build.** NHL 19 asks for half-rate output (30 fps on a PS4, 45 here) in menus, stoppages and replays. This ignores the request so those run at 90 too. Replays still play at normal speed. |
 | `submit_draw_interval` | `200` | Sends recorded work to the graphics card every 200 draws instead of all at once, so there's less to wait for when the game reads data back mid-frame. |
@@ -164,15 +165,43 @@ The test PC also had these global settings in `config.json`: `"present_mode": "I
 > Changing NHL 19's per-game settings in QtLauncher can rewrite `CUSA11126.json` without the three settings this
 > build adds. If you change them there, check the file afterwards.
 
-## Lighter settings for other PCs and screens
+## Adjusting for your PC and screen
+
+### Frame rate
+
+`vblank_frequency` sets the refresh rate of the emulated PS4 display, and the game draws at most one frame per
+refresh, so it's the frame rate the game aims for. 90 isn't a limit: the setting takes any whole number from 30
+up, and 90 is simply what the test PC holds. Pick your value by two rules:
+
+- **Your PC has to hold it almost all the time.** A frame that isn't ready for the next refresh waits for the one
+  after, so a rate your PC can't keep up with gives uneven frames, which looks worse than a steady lower rate. The
+  limit is mostly single-core CPU speed. On the test PC, typical gameplay takes the emulator about 10 ms per
+  frame, so it tops out at roughly 100 fps, and the busiest moments already dip below 90.
+- **Your screen has to show it evenly.** With variable refresh (FreeSync or G-Sync) turned on in your graphics
+  driver, any value in your screen's range works. Without it, use a value that divides evenly into your refresh
+  rate, the highest one your PC holds:
+
+| Screen | Values that work |
+|---|---|
+| Variable refresh | Anything in its range, such as 75, 90 or 100 |
+| 60 Hz | 60 |
+| 75 Hz | 75 |
+| 120 Hz | 60 or 120 |
+| 144 Hz | 72 or 144 |
+| 180 Hz | 60, 90 or 180 |
+| 240 Hz | 60, 80 or 120 |
+
+NHL 19 played at normal speed at 60 and 90 fps, and it shows menus and replays at 90 instead of its usual 30
+without speeding them up, so its game speed doesn't depend on the frame rate. Only 60 and 90 have been tested.
+Other rates should behave the same, but if the game ever looks sped up or slowed down, go back to one of those.
+
+### Other settings
 
 | If | Change |
 |---|---|
-| Your screen is 60 Hz, or 120 or 144 Hz without variable refresh | Set `"vblank_frequency": 60` in `CUSA11126.json`. 90 fps doesn't line up with those refresh rates. |
-| Your CPU can't hold 90 fps | Set `"vblank_frequency": 60`. Frame rate depends mostly on single-core CPU speed. |
 | Your GPU struggles at 4K | Lower the resolution in `config.json` to 2560 × 1440 or 1920 × 1080. |
 | It's still too slow | Set `"neo_mode": false` to use the base PS4 renderer. |
-| You notice judder or shaking jerseys | Set `"flip_queue_depth": 1`. This brings back the dips from 90, but keeps the pacing fix. |
+| You notice judder or shaking jerseys | First check that your frame rate suits your PC and screen. If it does, set `"flip_queue_depth": 1`. This brings back the dips from 90, but keeps the pacing fix. |
 | You'd rather have menus and replays at the game's own half rate | Set `"ignore_flip_rate": false`. |
 
 ## Using Puck Peak Overtime
@@ -200,7 +229,7 @@ over.
 | Gameplay is black, menus are fine | The NHL 19 config isn't being used. Check that the file is named exactly `CUSA11126.json` and is in `%APPDATA%\shadPS4\custom_configs\`, then check the log as in [step 6](#6-check-that-the-config-is-used). |
 | Goal nets are solid sheets | You're on a shadPS4 build without the alpha to coverage fix. Use this build. |
 | Everything renders small or blurry | The resolution in `config.json` is still at its default of 1280 × 720. See [step 4](#4-add-the-nhl-19-config). |
-| Judder or shaking jerseys | Set `"flip_queue_depth": 1`. |
+| Judder or shaking jerseys | Make sure your frame rate suits your PC and screen ([Frame rate](#frame-rate)). If it does, set `"flip_queue_depth": 1`. |
 | The settings don't change anything | If the folder shadPS4 starts in (normally the one with `shadPS4.exe`) has a `user` folder, shadPS4 keeps its settings there instead of in `%APPDATA%\shadPS4`. Put the files there instead, or rename that folder to switch back. |
 | Something else | Look at the end of `%APPDATA%\shadPS4\log\shad_log.txt` and open an issue with the log attached. |
 
@@ -295,7 +324,7 @@ both cases the time just moved into the pacing wait. Raising `flip_queue_depth` 
   and without readbacks it never sees them.
 - **4K:** `neo_mode` plus a 3840 × 2160 resolution in `config.json`. In Pro mode the game renders at the resolution
   shadPS4 reports for the display.
-- **90 fps:** `vblank_frequency` 90. NHL 19 keeps normal game speed at 90 fps.
+- **90 fps:** `vblank_frequency` 90 instead of the default 60. NHL 19 keeps normal game speed at 90 fps.
 
 ### Branches
 
