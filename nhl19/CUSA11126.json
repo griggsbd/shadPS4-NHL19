@@ -1,0 +1,19 @@
+{
+    "General": {
+        "neo_mode": true
+    },
+    "GPU": {
+        "flip_queue_depth": 2,
+        "frame_overlap": true,
+        "full_screen": true,
+        "full_screen_mode": "Fullscreen",
+        "ignore_flip_rate": true,
+        "readbacks_mode": 2,
+        "readback_linear_images_enabled": true,
+        "submit_draw_interval": 200,
+        "vblank_frequency": 90
+    },
+    "Vulkan": {
+        "pipeline_cache_enabled": true
+    }
+}
