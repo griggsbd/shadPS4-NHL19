@@ -133,6 +133,7 @@ void Liverpool::Process(std::stop_token stoken) {
     while (!stoken.stop_requested()) {
         {
             VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Idle};
+            VideoCore::Prof::TraceDuration trace{VideoCore::Prof::Ev::GpuIdle};
             std::unique_lock lk{submit_mutex};
             Common::CondvarWait(submit_cv, lk, stoken,
                                 [this] { return num_commands || num_submits || submit_done; });
@@ -161,9 +162,16 @@ void Liverpool::Process(std::stop_token stoken) {
                 }
                 task = queue.submits.front();
             }
+            if (!queue.front_started) {
+                queue.front_started = true;
+                VideoCore::Prof::Trace(VideoCore::Prof::Ev::TaskBegin, 0,
+                                       static_cast<u8>(curr_qid));
+            }
             task.resume();
 
             if (task.done()) {
+                queue.front_started = false;
+                VideoCore::Prof::Trace(VideoCore::Prof::Ev::TaskEnd, 0, static_cast<u8>(curr_qid));
                 task.destroy();
 
                 std::scoped_lock lock{queue.m_access};
@@ -183,6 +191,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 rasterizer->Flush();
             }
             submit_done = false;
+            VideoCore::Prof::Trace(VideoCore::Prof::Ev::GpuSubmitDone);
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
@@ -1329,6 +1338,7 @@ Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::sp
 }
 
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::SubmitGfx, static_cast<u32>(dcb.size()));
     auto& queue = mapped_queues[GfxQueueId];
 
     if (EmulatorSettings.IsCopyGpuBuffers()) {
@@ -1401,11 +1411,13 @@ Liverpool::Task Liverpool::ProcessSubmitDone(std::array<u64, NumTotalQueues> asc
         rasterizer->Flush();
     }
     submit_done_processed.fetch_add(1, std::memory_order_release);
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::GpuSubmitDone, 1);
     FIBER_EXIT;
 }
 
 void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     ASSERT_MSG(gnm_vqid > 0 && gnm_vqid < NumTotalQueues, "Invalid virtual ASC queue index");
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::SubmitAsc, gnm_vqid);
     auto& queue = mapped_queues[gnm_vqid];
 
     const auto vqid = gnm_vqid - 1;

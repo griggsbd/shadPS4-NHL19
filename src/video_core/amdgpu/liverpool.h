@@ -216,6 +216,7 @@ private:
         ComputeProgram cs_state{};
         std::atomic<u64> enqueued{};  // tasks submitted to this queue
         std::atomic<u64> completed{}; // tasks this queue has finished
+        bool front_started{};         // GPU thread only: the front task has been resumed
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
     std::queue<Task::Handle> ce_submits;

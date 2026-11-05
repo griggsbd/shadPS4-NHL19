@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -11,6 +13,7 @@
 #include "core/libraries/videoout/video_out.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
+#include "video_core/gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -140,15 +143,47 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
 
 s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
     LOG_TRACE(Lib_VideoOut, "called");
-    driver->GetPort(handle)->flip_rate = rate;
+    auto* port = driver->GetPort(handle);
+    if (!port) {
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    const bool ignore = EmulatorSettings.IsIgnoreFlipRate();
+    static s32 last_requested = 0;
+    if (rate != last_requested) {
+        LOG_INFO(Lib_VideoOut, "Game set flip rate {} -> {}{}", last_requested, rate,
+                 ignore ? " (ignored)" : "");
+        VideoCore::Prof::Trace(VideoCore::Prof::Ev::FlipRate, static_cast<u32>(rate), ignore);
+        last_requested = rate;
+    }
+    port->flip_rate = ignore ? 0 : rate;
     return ORBIS_OK;
+}
+
+// With a deeper flip queue the game is shown one pending flip less per extra slot, so its own
+// pacing does not hold it back before the queue is full.
+static s32 PendingFlipsForGame(s32 pending) {
+    const s32 hidden = static_cast<s32>(EmulatorSettings.GetFlipQueueDepth()) - 1;
+    return std::max(0, pending - hidden);
+}
+
+static void TracePendingQuery(s32 reported, s32 actual) {
+    static thread_local s32 last_reported = -1;
+    static thread_local s32 last_actual = -1;
+    if (reported != last_reported || actual != last_actual) {
+        last_reported = reported;
+        last_actual = actual;
+        VideoCore::Prof::Trace(VideoCore::Prof::Ev::FlipQuery, static_cast<u32>(reported),
+                               static_cast<u8>(std::min(actual, 255)));
+    }
 }
 
 s32 PS4_SYSV_ABI sceVideoOutIsFlipPending(s32 handle) {
     LOG_TRACE(Lib_VideoOut, "called");
     auto* port = driver->GetPort(handle);
     std::unique_lock lock{port->port_mutex};
-    s32 pending = port->flip_status.flip_pending_num;
+    const s32 actual = port->flip_status.flip_pending_num;
+    const s32 pending = PendingFlipsForGame(actual);
+    TracePendingQuery(pending, actual);
     return pending;
 }
 
@@ -257,6 +292,10 @@ s32 PS4_SYSV_ABI sceVideoOutGetFlipStatus(s32 handle, FlipStatus* status) {
         std::unique_lock lock{port->port_mutex};
         *status = port->flip_status;
     }
+    const s32 actual = status->flip_pending_num;
+    status->flip_pending_num = PendingFlipsForGame(status->flip_pending_num);
+    status->gc_queue_num = PendingFlipsForGame(status->gc_queue_num);
+    TracePendingQuery(status->flip_pending_num, actual);
 
     LOG_TRACE(Lib_VideoOut,
               "count = {}, processTime = {}, tsc = {}, submitTsc = {}, flipArg = {}, gcQueueNum = "
@@ -348,6 +387,7 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
     const u64 seq = driver->NextFlipSeq();
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::FlipQueued, static_cast<u32>(seq));
 
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
@@ -387,6 +427,7 @@ s32 PS4_SYSV_ABI sceVideoOutWaitVblank(s32 handle) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
+    VideoCore::Prof::TraceDuration trace{VideoCore::Prof::Ev::VblankWait};
     std::unique_lock lock{port->vo_mutex};
     const auto prev_counter = port->vblank_status.count;
     port->vblank_cv.wait(lock, [&]() { return prev_counter != port->vblank_status.count; });

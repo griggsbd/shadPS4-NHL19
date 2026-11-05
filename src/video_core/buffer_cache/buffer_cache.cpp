@@ -157,6 +157,10 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         flush_request();
     } else {
         VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::ReadbackStall};
+        VideoCore::Prof::TraceDuration trace{VideoCore::Prof::Ev::RbStall};
+        if (!VideoCore::Prof::IsRenderThread()) {
+            trace.Cancel();
+        }
         liverpool->SendCommand<true>(std::move(flush_request));
     }
 }

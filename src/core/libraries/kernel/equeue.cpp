@@ -17,6 +17,7 @@
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
 #include "core/net/guest_net.h"
+#include "video_core/gpu_profiler.h"
 
 namespace Libraries::Kernel {
 
@@ -616,7 +617,39 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
+    const u64 wait_start = VideoCore::Prof::Now();
     *out = equeue->WaitForEvents(ev, num, timo);
+    {
+        // Record waits that blocked or that a video out event ended.
+        using VideoCore::Prof::EqWake;
+        EqWake wake = EqWake::Timeout;
+        if (*out > 0) {
+            switch (ev[0].filter) {
+            case OrbisKernelEvent::Filter::VideoOut:
+                wake = ev[0].ident == 0x6   ? EqWake::Flip
+                       : ev[0].ident == 0x7 ? EqWake::Vblank
+                                            : EqWake::OtherVideo;
+                break;
+            case OrbisKernelEvent::Filter::User:
+                wake = EqWake::User;
+                break;
+            case OrbisKernelEvent::Filter::Timer:
+            case OrbisKernelEvent::Filter::HrTimer:
+                wake = EqWake::Timer;
+                break;
+            case OrbisKernelEvent::Filter::GraphicsCore:
+                wake = EqWake::Graphics;
+                break;
+            default:
+                wake = EqWake::Other;
+                break;
+            }
+        }
+        const u32 waited = VideoCore::Prof::TicksToMicros(VideoCore::Prof::Now() - wait_start);
+        if (waited >= 20 || wake == EqWake::Flip || wake == EqWake::Vblank) {
+            VideoCore::Prof::Trace(VideoCore::Prof::Ev::EqWait, waited, static_cast<u8>(wake));
+        }
+    }
 
     if (*out == 0) {
         return ORBIS_KERNEL_ERROR_ETIMEDOUT;

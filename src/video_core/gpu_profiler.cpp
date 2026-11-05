@@ -2,14 +2,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <fmt/format.h>
 
 #include "common/logging/log.h"
 #include "common/native_clock.h"
+#include "common/path_util.h"
 #include "core/libraries/kernel/time.h"
 #include "video_core/gpu_profiler.h"
 
@@ -153,7 +159,138 @@ void LogWindow(const Window& w, double ms_per_tick, double scope_cost_ms, double
              w.worst_interval, ms(w.worst_self[Idx(Cat::Idle)]), line);
 }
 
+// ---- Timeline -----------------------------------------------------------------------------
+
+struct TimelineEvent {
+    u64 tsc;
+    u32 arg;
+    u8 type;
+    u8 aux;
+    u16 thread;
+};
+static_assert(sizeof(TimelineEvent) == 16);
+
+constexpr u64 kTimelineMaxBytes = 96ull << 20;
+constexpr size_t kThreadBatch = 256;
+
+std::mutex g_timeline_mutex;
+std::vector<TimelineEvent> g_timeline_pending;
+std::atomic<u16> g_timeline_next_thread{1};
+std::once_flag g_timeline_once;
+
+u64 TscFrequency() {
+    static const u64 freq = Libraries::Kernel::Dev::GetClock()->GetTscFrequency();
+    return freq;
+}
+
+struct ThreadTimeline {
+    std::vector<TimelineEvent> events;
+    u64 last_flush = 0;
+    u16 id = 0;
+    bool render_thread = false;
+
+    void Flush() {
+        if (events.empty()) {
+            return;
+        }
+        std::scoped_lock lk{g_timeline_mutex};
+        g_timeline_pending.insert(g_timeline_pending.end(), events.begin(), events.end());
+        events.clear();
+    }
+    ~ThreadTimeline() {
+        Flush();
+    }
+};
+thread_local ThreadTimeline t_timeline;
+
+void TimelineWriter(std::filesystem::path path) {
+    std::ofstream out{path, std::ios::binary | std::ios::trunc};
+    if (!out) {
+        LOG_ERROR(Render, "GpuProf: could not open timeline file {}", path.string());
+        return;
+    }
+    // Header: magic, version, TSC frequency, start TSC.
+    const char magic[8] = {'S', 'P', 'T', 'L', '0', '0', '0', '1'};
+    const u64 freq = TscFrequency();
+    const u64 start = Now();
+    out.write(magic, sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&freq), sizeof(freq));
+    out.write(reinterpret_cast<const char*>(&start), sizeof(start));
+    out.flush();
+
+    u64 written = 0;
+    std::vector<TimelineEvent> batch;
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        {
+            std::scoped_lock lk{g_timeline_mutex};
+            batch.swap(g_timeline_pending);
+        }
+        if (!batch.empty() && written < kTimelineMaxBytes) {
+            const auto bytes = batch.size() * sizeof(TimelineEvent);
+            out.write(reinterpret_cast<const char*>(batch.data()), bytes);
+            out.flush();
+            written += bytes;
+            if (written >= kTimelineMaxBytes) {
+                LOG_INFO(Render, "GpuProf: timeline reached {} MB, recording stopped",
+                         kTimelineMaxBytes >> 20);
+            }
+        }
+        batch.clear();
+    }
+}
+
+void StartTimeline() {
+    const auto path = Common::FS::GetUserPath(Common::FS::PathType::LogDir) / "gpu_timeline.bin";
+    LOG_INFO(Render, "GpuProf: recording frame timeline to {}", path.string());
+    std::thread{TimelineWriter, path}.detach();
+}
+
 } // namespace
+
+u32 TicksToMicros(u64 ticks) {
+    const u64 freq = TscFrequency();
+    if (freq == 0) {
+        return 0;
+    }
+    const u64 us = ticks / (freq / 1000000 ? freq / 1000000 : 1);
+    return static_cast<u32>(std::min<u64>(us, 0xFFFFFFFFull));
+}
+
+static ThreadTimeline& ThisThreadTimeline() {
+    std::call_once(g_timeline_once, StartTimeline);
+    auto& tl = t_timeline;
+    if (tl.id == 0) {
+        tl.id = g_timeline_next_thread.fetch_add(1, std::memory_order_relaxed);
+        tl.events.reserve(kThreadBatch);
+        // The log prefix names the thread, which ties the id to a thread name.
+        LOG_INFO(Render, "GpuProf: timeline thread {}", tl.id);
+    }
+    return tl;
+}
+
+void Trace(Ev ev, u32 arg, u8 aux) {
+    auto& tl = ThisThreadTimeline();
+    const u64 now = Now();
+    tl.events.push_back({now, arg, static_cast<u8>(ev), aux, tl.id});
+    // Flush in batches, and at least every 50 ms so quiet threads still show up.
+    if (tl.events.size() >= kThreadBatch || now - tl.last_flush > TscFrequency() / 20) {
+        tl.Flush();
+        tl.last_flush = now;
+    }
+}
+
+void MarkRenderThread() {
+    // Registering here keeps the first trace of a readback stall, which runs in the page fault
+    // handler, from also having to log.
+    if (!t_timeline.render_thread) {
+        ThisThreadTimeline().render_thread = true;
+    }
+}
+
+bool IsRenderThread() {
+    return t_timeline.render_thread;
+}
 
 void OnFlip(u32 vblank_hz) {
     static thread_local bool calibrated = false;

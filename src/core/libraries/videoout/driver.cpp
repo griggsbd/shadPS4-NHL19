@@ -243,6 +243,7 @@ void VideoOutDriver::Flip(const Request& req) {
         VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::Present};
         presenter->Present(req.frame);
     }
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::Presented, static_cast<u32>(req.seq));
 
     auto* port = req.port;
 
@@ -296,11 +297,14 @@ u64 VideoOutDriver::NextFlipSeq() {
 
 void VideoOutDriver::WaitForFlipBacklog() {
     VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::Pacing};
+    const u32 depth = EmulatorSettings.GetFlipQueueDepth();
+    VideoCore::Prof::MarkRenderThread();
+    VideoCore::Prof::TraceDuration trace{VideoCore::Prof::Ev::Hold, static_cast<u8>(depth)};
     std::unique_lock lk{flip_pacing_mutex};
-    // Wait for the flip submitted before the newest one. The timeout only guards against a flip
-    // that never gets presented; it leaves the sequence numbers alone, so pacing resumes as soon
-    // as later flips reach the screen.
-    const u64 target = last_submitted_seq > 0 ? last_submitted_seq - 1 : 0;
+    // Wait until no more than `depth` flips are waiting for the display, the newest included. The
+    // timeout only guards against a flip that never gets presented; it leaves the sequence numbers
+    // alone, so pacing resumes as soon as later flips reach the screen.
+    const u64 target = last_submitted_seq > depth ? last_submitted_seq - depth : 0;
     const bool caught_up = flip_pacing_cv.wait_for(lk, std::chrono::milliseconds(100),
                                                    [&] { return last_presented_seq >= target; });
     if (!caught_up && (++flip_pacing_timeouts <= 10 || flip_pacing_timeouts % 100 == 0)) {
@@ -351,6 +355,7 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
                                         u64 seq) {
     VideoCore::Prof::OnFlip(EmulatorSettings.GetVblankFrequency());
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::GpuFlip, static_cast<u32>(seq));
     VideoCore::Prof::Scope prof{VideoCore::Prof::Cat::Flip};
     Vulkan::Frame* frame;
     if (index == -1) {
@@ -403,6 +408,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
+        VideoCore::Prof::Trace(VideoCore::Prof::Ev::Vblank, static_cast<u32>(vblank_status.count),
+                               static_cast<u8>(main_port.flip_rate));
         if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (!request) {

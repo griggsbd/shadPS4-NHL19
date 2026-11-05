@@ -202,4 +202,64 @@ private:
 // Called on the GPU thread whenever it reaches a flip. Logs once every kWindowFrames flips.
 void OnFlip(u32 vblank_hz);
 
+// Timeline of the events that pace a frame, written to gpu_timeline.bin in the log folder.
+// Events that report a duration are recorded when they end, with the duration in microseconds.
+enum class Ev : u8 {
+    // Game threads
+    SubmitGfx = 1,  // arg: command buffer size in dwords
+    SubmitAsc = 2,  // arg: compute queue
+    FlipQueued = 3, // arg: flip sequence number
+    Hold = 4,       // flip pacing wait; aux: queue depth
+    SubmitDone = 5,
+    IdleWait = 6,   // submission waited for the GPU thread to go idle
+    RbStall = 7,    // readback stall on the render thread
+    EqWait = 8,     // event queue wait; aux: what ended it (see EqWake)
+    FlipRate = 9,   // arg: flip rate the game asked for; aux: 1 if ignored
+    FlipQuery = 10, // pending flips reported to the game changed; arg: reported, aux: actual
+    VblankWait = 11,
+    // GPU thread
+    GpuIdle = 32,
+    TaskBegin = 33, // aux: queue id
+    TaskEnd = 34,   // aux: queue id
+    GpuFlip = 35,   // arg: flip sequence number
+    GpuSubmitDone = 36,
+    // Present thread
+    Vblank = 48,    // arg: vblank count; aux: flip rate in effect
+    Presented = 49, // arg: flip sequence number
+};
+
+// What ended an event queue wait.
+enum class EqWake : u8 { Timeout, Flip, Vblank, OtherVideo, User, Timer, Graphics, Other };
+
+void Trace(Ev ev, u32 arg = 0, u8 aux = 0);
+u32 TicksToMicros(u64 ticks);
+
+// The thread that submits the game's command buffers.
+void MarkRenderThread();
+bool IsRenderThread();
+
+class TraceDuration {
+public:
+    explicit TraceDuration(Ev ev_, u8 aux_ = 0) : ev{ev_}, aux{aux_}, start{Now()} {}
+    ~TraceDuration() {
+        if (enabled) {
+            Trace(ev, TicksToMicros(Now() - start), aux);
+        }
+    }
+    void Cancel() {
+        enabled = false;
+    }
+    void SetAux(u8 aux_) {
+        aux = aux_;
+    }
+    TraceDuration(const TraceDuration&) = delete;
+    TraceDuration& operator=(const TraceDuration&) = delete;
+
+private:
+    Ev ev;
+    u8 aux;
+    u64 start;
+    bool enabled = true;
+};
+
 } // namespace VideoCore::Prof

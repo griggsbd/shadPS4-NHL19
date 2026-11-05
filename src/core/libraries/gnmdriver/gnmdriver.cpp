@@ -95,7 +95,12 @@ static bool UseFrameOverlap() {
 static void WaitGpuIdle() {
     HLE_TRACE;
     VideoCore::Prof::GlobalScope prof{VideoCore::Prof::Global::GpuIdle};
+    VideoCore::Prof::MarkRenderThread();
     std::unique_lock lock{m_wait_idle};
+    if (submission_lock == 0) {
+        return;
+    }
+    VideoCore::Prof::TraceDuration trace{VideoCore::Prof::Ev::IdleWait};
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
 
@@ -1485,6 +1490,7 @@ s32 PS4_SYSV_ABI sceGnmRequestFlipAndSubmitDoneForWorkload(u64 workload, u32* gp
         submission_lock = true;
     }
     liverpool->SubmitDone(overlap);
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::SubmitDone);
     send_init_packet = true;
 
     // Pace the game against the display only after its frame has reached the GPU.
@@ -2504,6 +2510,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
         submission_lock = true;
     }
     liverpool->SubmitDone(overlap);
+    VideoCore::Prof::Trace(VideoCore::Prof::Ev::SubmitDone);
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
