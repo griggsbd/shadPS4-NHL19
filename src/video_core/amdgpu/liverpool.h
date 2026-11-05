@@ -72,12 +72,20 @@ public:
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
-    void SubmitDone() noexcept {
-        std::scoped_lock lk{submit_mutex};
-        mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
-        mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
-        submit_done = true;
-        submit_cv.notify_one();
+    /// Marks the end of the game's submissions for a frame. With `in_order` the end of frame work
+    /// is queued behind the frame's graphics work, so the GPU thread runs it as soon as that frame
+    /// is processed, even if the game has already submitted the next one. Otherwise it runs once
+    /// every queue is idle.
+    void SubmitDone(bool in_order = false) noexcept;
+
+    /// Waits until at most `max_pending` in-order frame ends are still waiting to be processed.
+    void WaitSubmitDoneBacklog(u64 max_pending) noexcept {
+        std::unique_lock lk{submit_mutex};
+        submit_cv.wait(lk, [&] {
+            return submit_done_issued.load(std::memory_order_acquire) -
+                       submit_done_processed.load(std::memory_order_acquire) <=
+                   max_pending;
+        });
     }
 
     void WaitGpuIdle() noexcept {
@@ -191,6 +199,7 @@ private:
     Task ProcessCeUpdate(std::span<const u32> ccb);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
+    Task ProcessSubmitDone(std::array<u64, NumTotalQueues> asc_targets);
 
     void ProcessCommands();
     void ProcessCeQueue();
@@ -205,6 +214,8 @@ private:
         std::vector<u32> ccb_buffer;
         std::queue<Task::Handle> submits{};
         ComputeProgram cs_state{};
+        std::atomic<u64> enqueued{};  // tasks submitted to this queue
+        std::atomic<u64> completed{}; // tasks this queue has finished
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
     std::queue<Task::Handle> ce_submits;
@@ -233,6 +244,8 @@ private:
     std::atomic<u32> num_submits{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
+    std::atomic<u64> submit_done_issued{};
+    std::atomic<u64> submit_done_processed{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};

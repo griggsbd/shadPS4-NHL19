@@ -435,6 +435,9 @@ struct GPUSettings {
     Setting<bool> inline_fetch_shader{false};
     Setting<bool> fast_shader_math{false};
     Setting<u32> submit_draw_interval{0};
+    Setting<bool> frame_overlap{false};
+    Setting<bool> ignore_flip_rate{false};
+    Setting<u32> flip_queue_depth{1};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -461,6 +464,9 @@ struct GPUSettings {
             make_override<GPUSettings>("inline_fetch_shader", &GPUSettings::inline_fetch_shader),
             make_override<GPUSettings>("fast_shader_math", &GPUSettings::fast_shader_math),
             make_override<GPUSettings>("submit_draw_interval", &GPUSettings::submit_draw_interval),
+            make_override<GPUSettings>("frame_overlap", &GPUSettings::frame_overlap),
+            make_override<GPUSettings>("ignore_flip_rate", &GPUSettings::ignore_flip_rate),
+            make_override<GPUSettings>("flip_queue_depth", &GPUSettings::flip_queue_depth),
         };
     }
 };
@@ -471,7 +477,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
                                    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
                                    userfaultfd, inline_fetch_shader, fast_shader_math,
-                                   submit_draw_interval)
+                                   submit_draw_interval, frame_overlap, ignore_flip_rate,
+                                   flip_queue_depth)
 
 // -------------------------------
 // Vulkan settings
@@ -780,6 +787,14 @@ public:
     SETTING_FORWARD_BOOL_READONLY(m_gpu, InlineFetchShader, inline_fetch_shader)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, FastShaderMath, fast_shader_math)
     SETTING_FORWARD(m_gpu, SubmitDrawInterval, submit_draw_interval)
+    SETTING_FORWARD_BOOL(m_gpu, FrameOverlap, frame_overlap)
+    SETTING_FORWARD_BOOL(m_gpu, IgnoreFlipRate, ignore_flip_rate)
+
+    // How many flips the game may have waiting for the display, 1 to 3.
+    u32 GetFlipQueueDepth() const {
+        const u32 depth = m_gpu.flip_queue_depth.get(m_configMode);
+        return depth < 1 ? 1 : (depth > 3 ? 3 : depth);
+    }
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

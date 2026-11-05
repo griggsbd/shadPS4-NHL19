@@ -291,11 +291,12 @@ u64 VideoOutDriver::NextFlipSeq() {
 }
 
 void VideoOutDriver::WaitForFlipBacklog() {
+    const u32 depth = EmulatorSettings.GetFlipQueueDepth();
     std::unique_lock lk{flip_pacing_mutex};
-    // Wait for the flip submitted before the newest one. The timeout only guards against a flip
-    // that never gets presented; it leaves the sequence numbers alone, so pacing resumes as soon
-    // as later flips reach the screen.
-    const u64 target = last_submitted_seq > 0 ? last_submitted_seq - 1 : 0;
+    // Wait until no more than `depth` flips are waiting for the display, the newest included. The
+    // timeout only guards against a flip that never gets presented; it leaves the sequence numbers
+    // alone, so pacing resumes as soon as later flips reach the screen.
+    const u64 target = last_submitted_seq > depth ? last_submitted_seq - depth : 0;
     const bool caught_up = flip_pacing_cv.wait_for(lk, std::chrono::milliseconds(100),
                                                    [&] { return last_presented_seq >= target; });
     if (!caught_up && (++flip_pacing_timeouts <= 10 || flip_pacing_timeouts % 100 == 0)) {

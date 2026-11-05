@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -140,16 +142,35 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
 
 s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
     LOG_TRACE(Lib_VideoOut, "called");
-    driver->GetPort(handle)->flip_rate = rate;
+    auto* port = driver->GetPort(handle);
+    if (!port) {
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    // Games lower the flip rate for scenes they cap at half rate, like cutscenes and menus.
+    // Ignoring it lets those scenes run at the full refresh rate.
+    const bool ignore = EmulatorSettings.IsIgnoreFlipRate();
+    static s32 last_requested = 0;
+    if (rate != last_requested) {
+        LOG_INFO(Lib_VideoOut, "Game set flip rate {} -> {}{}", last_requested, rate,
+                 ignore ? " (ignored)" : "");
+        last_requested = rate;
+    }
+    port->flip_rate = ignore ? 0 : rate;
     return ORBIS_OK;
+}
+
+// With a deeper flip queue the game is shown one pending flip less per extra slot, so its own
+// pacing does not hold it back before the queue is full.
+static s32 PendingFlipsForGame(s32 pending) {
+    const s32 hidden = static_cast<s32>(EmulatorSettings.GetFlipQueueDepth()) - 1;
+    return std::max(0, pending - hidden);
 }
 
 s32 PS4_SYSV_ABI sceVideoOutIsFlipPending(s32 handle) {
     LOG_TRACE(Lib_VideoOut, "called");
     auto* port = driver->GetPort(handle);
     std::unique_lock lock{port->port_mutex};
-    s32 pending = port->flip_status.flip_pending_num;
-    return pending;
+    return PendingFlipsForGame(port->flip_status.flip_pending_num);
 }
 
 s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode, s64 flipArg) {
@@ -257,6 +278,8 @@ s32 PS4_SYSV_ABI sceVideoOutGetFlipStatus(s32 handle, FlipStatus* status) {
         std::unique_lock lock{port->port_mutex};
         *status = port->flip_status;
     }
+    status->flip_pending_num = PendingFlipsForGame(status->flip_pending_num);
+    status->gc_queue_num = PendingFlipsForGame(status->gc_queue_num);
 
     LOG_TRACE(Lib_VideoOut,
               "count = {}, processTime = {}, tsc = {}, submitTsc = {}, flipArg = {}, gcQueueNum = "
